@@ -8,8 +8,9 @@ from PySide6.QtGui import QColor, QPainter, QPen, QDesktopServices, QFontDatabas
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QPushButton,
     QHBoxLayout, QVBoxLayout, QGridLayout, QFrame, QLineEdit, QFileDialog,
     QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar, QMessageBox,
-    QAbstractItemView, QSplitter, QTextEdit)
+    QAbstractItemView, QSplitter, QTextEdit, QSpinBox, QComboBox, QScrollArea)
 import backup_engine as engine
+import research_tools as research
 
 
 def size(n):
@@ -131,7 +132,11 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(content)
         layout.setContentsMargins(28,22,28,20)
         layout.setSpacing(14)
-        page.addWidget(content)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(content)
+        content.setMinimumHeight(1090)
+        page.addWidget(scroll)
         hero = QHBoxLayout()
         text = QVBoxLayout()
         text.addWidget(QLabel('PROTECT WHAT MATTERS'))
@@ -162,7 +167,10 @@ class MainWindow(QMainWindow):
         self.source.setPlaceholderText('Choose the folder you want to protect')
         self.vault = QLineEdit(self.settings.value('vault',''))
         self.vault.setPlaceholderText('Choose backup storage, preferably on another drive')
-        for row, name, edit in [(1,'Source folder',self.source),(2,'Backup storage',self.vault)]:
+        self.secondary = QLineEdit(self.settings.value('secondary',''))
+        self.secondary.setPlaceholderText('Optional: separate drive or mounted off-site destination')
+        for row, name, edit in [(1,'Source folder',self.source),(2,'Primary backup',self.vault),
+                                (3,'Secondary copy',self.secondary)]:
             grid.addWidget(QLabel(name),row,0)
             grid.addWidget(edit,row,1)
             grid.addWidget(self.button('Browse…',lambda checked=False,e=edit:self.browse(e)),row,2)
@@ -173,12 +181,47 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.button('↻  Refresh history',self.refresh))
         actions.addStretch()
         actions.addWidget(QLabel('Original files are never deleted'))
-        grid.addLayout(actions,3,0,1,3)
+        grid.addLayout(actions,4,0,1,3)
+        topology = QLabel('3-copy plan: original → primary → secondary. Independent media, off-site location and offline/immutable protection must be arranged separately; folder paths cannot prove them.')
+        topology.setWordWrap(True)
+        grid.addWidget(topology,5,0,1,3)
         layout.addWidget(config)
+        evaluation = card()
+        ev = QGridLayout(evaluation)
+        ev.addWidget(QLabel('RECOVERY EVALUATION  ·  File-level targets'),0,0,1,4)
+        self.rto = QSpinBox()
+        self.rto.setRange(1,86400)
+        self.rto.setValue(int(self.settings.value('rto',300)))
+        self.rto.setSuffix(' seconds')
+        self.rpo = QSpinBox()
+        self.rpo.setRange(0,525600)
+        self.rpo.setValue(int(self.settings.value('rpo',60)))
+        self.rpo.setSuffix(' minutes')
+        ev.addWidget(QLabel('File-recovery time target'),1,0)
+        ev.addWidget(self.rto,1,1)
+        ev.addWidget(QLabel('Recovery-point age target'),1,2)
+        ev.addWidget(self.rpo,1,3)
+        self.evidence = QLabel('No recovery test yet. Actual lost transactions and business-service recovery are not measured.')
+        self.evidence.setWordWrap(True)
+        ev.addWidget(self.evidence,2,0,1,4)
+        self.review = QLabel('CHANGE REVIEW  ·  Rule-based, not AI. No baseline yet.')
+        self.review.setWordWrap(True)
+        ev.addWidget(self.review,3,0,1,4)
+        er = QHBoxLayout()
+        er.addWidget(self.button('Run recovery test',self.test_recovery))
+        er.addWidget(self.button('Find verified recovery point',self.recommend))
+        er.addWidget(self.button('Export latest result',self.export_result))
+        er.addWidget(self.button('Run controlled study',self.study))
+        ev.addLayout(er,4,0,1,4)
+        layout.addWidget(evaluation)
         middle = QSplitter(Qt.Horizontal)
         history_card = card()
         hl = QVBoxLayout(history_card)
         hl.addWidget(QLabel('BACKUP HISTORY  ·  Select a snapshot'))
+        self.history_location = QComboBox()
+        self.history_location.addItems(['Primary storage','Secondary storage'])
+        self.history_location.currentIndexChanged.connect(self.refresh)
+        hl.addWidget(self.history_location)
         self.table = QTableWidget(0,4)
         self.table.setHorizontalHeaderLabels(['Created (local)','Files','Payload','Copy time'])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -248,7 +291,7 @@ class MainWindow(QMainWindow):
         p = QFileDialog.getExistingDirectory(self,'Choose folder',edit.text())
         if p:
             edit.setText(p)
-            if edit is self.vault:
+            if edit in (self.vault,self.secondary):
                 self.refresh()
 
     def selected(self):
@@ -260,9 +303,10 @@ class MainWindow(QMainWindow):
 
     def refresh(self):
         self.records = []
-        if self.vault.text().strip():
+        storage = self.vault if self.history_location.currentIndex() == 0 else self.secondary
+        if storage.text().strip():
             try:
-                self.records = engine.history(self.vault.text().strip())
+                self.records = engine.history(storage.text().strip())
             except Exception as e:
                 self.note('Could not read backup history: '+str(e))
         self.table.setRowCount(len(self.records))
@@ -280,6 +324,7 @@ class MainWindow(QMainWindow):
         self.file_table.setRowCount(0)
         if self.records:
             self.table.selectRow(0)
+            self.show_files()
 
     def show_files(self):
         row = self.table.currentRow()
@@ -290,6 +335,14 @@ class MainWindow(QMainWindow):
         for i,(name,meta) in enumerate(sorted(files.items())):
             self.file_table.setItem(i,0,QTableWidgetItem(name))
             self.file_table.setItem(i,1,QTableWidgetItem(size(meta['size'])))
+        selected = self.records[row]
+        report_path = Path(selected['snapshot_path']).parent/'.reports'/('Backup-'+selected['id']+'.json')
+        try:
+            report = json.loads(engine.clean_path(report_path).read_text(encoding='utf-8'))
+            c = report['change_review']
+            self.review.setText(f"CHANGE REVIEW · {c['status']} · Added {c['added']}, changed {c['changed']}, deleted {c['deleted']}. Rule-based, not AI.")
+        except (OSError,ValueError,KeyError,TypeError):
+            self.review.setText('CHANGE REVIEW · No saved review for this copy. Integrity verification is not a malware scan.')
 
     def launch(self, title, fn, args):
         self.operation = title
@@ -300,6 +353,10 @@ class MainWindow(QMainWindow):
             b.setEnabled(False)
         self.source.setEnabled(False)
         self.vault.setEnabled(False)
+        self.secondary.setEnabled(False)
+        self.history_location.setEnabled(False)
+        self.rto.setEnabled(False)
+        self.rpo.setEnabled(False)
         self.table.setEnabled(False)
         self.worker = Worker(fn,args)
         self.worker.progress.connect(self.on_progress)
@@ -317,6 +374,10 @@ class MainWindow(QMainWindow):
             b.setEnabled(True)
         self.source.setEnabled(True)
         self.vault.setEnabled(True)
+        self.secondary.setEnabled(True)
+        self.history_location.setEnabled(True)
+        self.rto.setEnabled(True)
+        self.rpo.setEnabled(True)
         self.table.setEnabled(True)
 
     def backup(self):
@@ -325,7 +386,42 @@ class MainWindow(QMainWindow):
             return
         self.settings.setValue('source',self.source.text().strip())
         self.settings.setValue('vault',self.vault.text().strip())
-        self.launch('Backup',engine.create_backup,(self.source.text().strip(),self.vault.text().strip()))
+        self.settings.setValue('secondary',self.secondary.text().strip())
+        self.launch('Backup',research.protected_backup,(self.source.text().strip(),self.vault.text().strip(),self.secondary.text().strip()))
+
+    def test_recovery(self):
+        r = self.selected()
+        if not r:
+            return
+        destination = QFileDialog.getExistingDirectory(self,'Choose recovery-test destination — files will be restored to a new subfolder')
+        if destination:
+            self.settings.setValue('rto',self.rto.value())
+            self.settings.setValue('rpo',self.rpo.value())
+            self.launch('Recovery test',research.recovery_test,(r['snapshot_path'],destination,self.rto.value(),self.rpo.value()))
+
+    def recommend(self):
+        storage = self.vault if self.history_location.currentIndex() == 0 else self.secondary
+        if not storage.text().strip():
+            QMessageBox.information(self,'Choose storage','Choose the storage folder first.')
+            return
+        self.launch('Recovery-point review',research.recommend,(storage.text().strip(),))
+
+    def study(self):
+        destination = QFileDialog.getExistingDirectory(self,'Choose report folder — study creates and changes only new sample files in its own subfolder')
+        if destination:
+            self.launch('Controlled study',research.controlled_study,(destination,self.rto.value(),self.rpo.value()))
+
+    def export_result(self):
+        if self.last_result is None:
+            QMessageBox.information(self,'No result','Run a backup, verification or recovery test first.')
+            return
+        path,_ = QFileDialog.getSaveFileName(self,'Export latest measured result','recovery-result.json','JSON (*.json)')
+        if path:
+            try:
+                Path(path).write_text(json.dumps(self.last_result,indent=2),encoding='utf-8')
+                self.note('Result exported to '+path)
+            except OSError as e:
+                QMessageBox.warning(self,'Export failed',str(e))
 
     def verify(self):
         r = self.selected()
@@ -344,8 +440,35 @@ class MainWindow(QMainWindow):
         self.last_result = result
         self.progress.setValue(100)
         message = self.operation+' complete. All copied file hashes verified.'
-        if 'output' in result:
+        if result.get('kind') == 'controlled_study':
+            message = f"Controlled study complete: {result['service_query_passes']}/5 student-record queries passed after real restoration. Rule false alerts: {result['rule_false_positives']}."
+            self.evidence.setText(message+' Generated fixtures; not AI or production results.')
+            self.note('Study report: '+result['report_path'])
+        elif result.get('kind') == 'backup_plan':
+            m = result['manifest']
+            message = f"Primary backup VERIFIED. Secondary: {result['secondary']}. {len(m['files'])} files; {size(m['bytes'])}."
+            c = result['change_review']
+            self.review.setText(f"CHANGE REVIEW · {c['status']} · Added {c['added']}, changed {c['changed']}, deleted {c['deleted']}. Rule-based, not AI.")
+            for alert in c['alerts']:
+                self.note(alert)
+            if result['secondary'] == 'FAILED':
+                self.note('Secondary failed; primary retained: '+result['secondary_error'])
+            self.evidence.setText(message+' Media independence and off-site placement are not verified by the app.')
+        elif result.get('kind') == 'recommendation':
+            message = 'Candidate: '+result['candidate']+' · '+result['note']
+            self.evidence.setText(message)
+        elif 'output' in result:
             message += '\nRestored to: '+result['output']
+            if result.get('kind') == 'recovery_test':
+                t = 'PASS' if result['file_recovery_target_met'] else 'MISSED'
+                a = result['recovery_point_age_seconds']
+                age = 'Unknown (legacy backup)' if a is None else f'{a/60:.2f} min'
+                age_pass = 'UNKNOWN' if a is None else ('PASS' if result['recovery_point_age_target_met'] else 'MISSED')
+                self.evidence.setText(f"FILE RECOVERY {t} · {result['restore_seconds']:.3f}s / {result['rto_target_seconds']}s target. RECOVERY-POINT AGE {age_pass} · {age}. Service recovery NOT TESTED.")
+                if result.get('report_path'):
+                    self.note('Report saved: '+result['report_path'])
+                if result.get('report_save_error'):
+                    self.note('Restore succeeded but report could not be saved: '+result['report_save_error'])
         elif self.operation == 'Backup':
             message += f" {len(result['files'])} files · {size(result['bytes'])} · {result['duration_seconds']} seconds measured copy/verification time."
         self.status.setText(message)

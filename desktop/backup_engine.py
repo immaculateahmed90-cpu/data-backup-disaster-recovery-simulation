@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import time
@@ -53,14 +54,22 @@ def read_manifest(snapshot):
     m = json.loads(clean_path(snapshot / 'manifest.json').read_text(encoding='utf-8'))
     if m.get('format') != 1 or not isinstance(m.get('files'), dict):
         raise ValueError('Unsupported backup manifest.')
+    if not isinstance(m.get('id'),str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}',m['id']):
+        raise ValueError('Invalid snapshot identifier.')
+    if not isinstance(m.get('source'),str) or not Path(m['source']).is_absolute():
+        raise ValueError('Invalid source path in manifest.')
+    if not isinstance(m.get('directories',[]),list):
+        raise ValueError('Invalid directory list.')
     seen = set()
     for name, meta in m['files'].items():
         safe_relative(name)
         if name.casefold() in seen:
             raise ValueError('Conflicting filenames in manifest.')
         seen.add(name.casefold())
-        if not isinstance(meta.get('sha256'), str) or len(meta['sha256']) != 64:
+        if not isinstance(meta,dict) or not isinstance(meta.get('sha256'), str) or not re.fullmatch(r'[0-9a-f]{64}',meta['sha256']):
             raise ValueError('Invalid file checksum.')
+        if not isinstance(meta.get('size'),int) or isinstance(meta['size'],bool) or meta['size'] < 0:
+            raise ValueError('Invalid file size.')
     for name in m.get('directories', []):
         safe_relative(name)
     return m
@@ -68,6 +77,7 @@ def read_manifest(snapshot):
 
 def create_backup(source, vault, progress=lambda n, text: None):
     start = time.perf_counter()
+    capture_started = datetime.now(timezone.utc).isoformat()
     source, vault = clean_path(source), clean_path(vault)
     if not source.is_dir():
         raise ValueError('Choose an existing source folder.')
@@ -115,7 +125,8 @@ def create_backup(source, vault, progress=lambda n, text: None):
             records[rel] = {'size': after.st_size, 'sha256': copied_hash}
             progress(int((i+1)*100/max(1,len(entries))), rel)
         result = {'format': 1, 'id': ident, 'created': datetime.now(timezone.utc).isoformat(),
-                  'source': str(source), 'type': 'Full snapshot', 'files': records,
+                  'source': str(source), 'capture_started': capture_started,
+                  'type': 'Full snapshot', 'files': records,
                   'directories': directories, 'bytes': sum(x['size'] for x in records.values()),
                   'duration_seconds': round(time.perf_counter()-start, 3)}
         (staging / 'manifest.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
@@ -143,6 +154,7 @@ def verify_backup(snapshot, progress=lambda n, text: None):
 
 
 def restore_backup(snapshot, destination, progress=lambda n, text: None):
+    started = time.perf_counter()
     snapshot, destination = clean_path(snapshot), clean_path(destination)
     m = verify_backup(snapshot)
     if overlap(destination, snapshot.parent):
@@ -164,7 +176,9 @@ def restore_backup(snapshot, destination, progress=lambda n, text: None):
                 raise ValueError('Restored file verification failed: ' + name)
             progress(int((i+1)*100/max(1,len(m['files']))), name)
         progress(100, 'Restore complete and verified')
-        return {'output': str(output), 'files': len(m['files'])}
+        return {'output': str(output), 'files': len(m['files']),
+                'restore_seconds': time.perf_counter() - started,
+                'integrity': 'PASS', 'snapshot_id': m['id']}
     except Exception:
         shutil.rmtree(output)
         raise

@@ -75,6 +75,15 @@ class BackupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             e.restore_backup(p,self.root/'restore')
 
+    def test_manifest_identifier_traversal_rejected(self):
+        p = self.backup()
+        path = p/'manifest.json'
+        m = json.loads(path.read_text())
+        m['id'] = '../../escape'
+        path.write_text(json.dumps(m))
+        with self.assertRaises(ValueError):
+            e.restore_backup(p,self.root/'restore')
+
     def test_unsafe_windows_paths(self):
         for value in ['../a','C:/a','a\\b','/a','a:stream','CON','a/../b','a.']:
             with self.assertRaises(ValueError):
