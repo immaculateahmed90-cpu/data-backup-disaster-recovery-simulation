@@ -1,5 +1,22 @@
 # Recovery Vault — Windows desktop app
 
+## Version 4 presentation workflow
+
+Click **Run controlled study** for a single report with the existing five recovery
+scenarios, an encrypted archive-only recovery after removing the generated primary,
+and a monitoring comparison. The classifier learns centroids from 200 generated
+examples and is compared with the 30% rule on 100 separate generated examples.
+Use the reported confusion counts to discuss false alerts and missed cases. Live
+alerts still use the existing rule. Generated results describe this experiment only.
+
+For your own data, export an encrypted archive, then use **Copy and verify archive**
+to copy and authenticate it on your chosen alternate storage. Use **Run archive
+recovery drill** to restore from that copy and save a JSON report with the measured
+restore time and target result. Record physical media, off-site placement and whether
+the primary was disconnected in your presentation notes. The operator manages media
+separation, physical disconnection and retention. Automatic scheduling and provider
+enforced immutability are outside the current workflow.
+
 A real PySide6 application for local folder backups. This is separate from the
 educational simulation and does not modify its code or the repository's main branch.
 

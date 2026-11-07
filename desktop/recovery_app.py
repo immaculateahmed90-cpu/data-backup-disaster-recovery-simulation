@@ -203,6 +203,8 @@ class MainWindow(QMainWindow):
         self.decrypt_button = self.button('Restore encrypted archive',self.decrypt_archive)
         secure_actions.addWidget(self.encrypt_button)
         secure_actions.addWidget(self.decrypt_button)
+        secure_actions.addWidget(self.button('Copy and verify archive',self.copy_archive))
+        secure_actions.addWidget(self.button('Run archive recovery drill',lambda: self.decrypt_archive(drill=True)))
         sec.addLayout(secure_actions)
         layout.addWidget(security)
         evaluation = card()
@@ -458,7 +460,18 @@ class MainWindow(QMainWindow):
         if password is not None:
             self.launch('Encrypted export',encrypted.export_encrypted,(r['snapshot_path'],path,password))
 
-    def decrypt_archive(self):
+    def copy_archive(self):
+        path,_ = QFileDialog.getOpenFileName(self,'Choose encrypted archive','','Recovery Vault encrypted (*.rvault)')
+        if not path:
+            return
+        destination = QFileDialog.getExistingDirectory(self,'Choose alternate backup storage')
+        if not destination:
+            return
+        password = self.password_prompt()
+        if password is not None:
+            self.launch('Verified archive copy',encrypted.copy_verified_archive,(path,destination,password))
+
+    def decrypt_archive(self, drill=False):
         path,_ = QFileDialog.getOpenFileName(self,'Choose encrypted recovery archive','','Recovery Vault encrypted (*.rvault);;All files (*)')
         if not path:
             return
@@ -467,7 +480,10 @@ class MainWindow(QMainWindow):
             return
         password = self.password_prompt()
         if password is not None:
-            self.launch('Encrypted restore',encrypted.restore_encrypted,(path,destination,password))
+            if drill:
+                self.launch('Archive recovery drill',encrypted.archive_drill,(path,destination,password,self.rto.value()))
+            else:
+                self.launch('Encrypted restore',encrypted.restore_encrypted,(path,destination,password))
 
     def recommend(self):
         storage = self.vault if self.history_location.currentIndex() == 0 else self.secondary
@@ -510,12 +526,18 @@ class MainWindow(QMainWindow):
         self.last_result = result
         self.progress.setValue(100)
         message = self.operation+' complete. All copied file hashes verified.'
-        if result.get('kind') == 'encrypted_export':
+        if result.get('kind') == 'verified_archive_copy':
+            message = 'Destination archive authenticated: '+result['archive']
+            self.security_status.setText(message)
+        elif result.get('kind') == 'encrypted_export':
             message = f"Encrypted archive created and authenticated: {result['archive']}"
             self.security_status.setText('ARCHIVE VERIFIED · AES-256-GCM · '+size(result['archive_bytes'])+'. Folder backups remain unencrypted.')
         elif result.get('kind') == 'controlled_study':
             message = f"Controlled study complete: {result['service_query_passes']}/5 student-record queries passed after real restoration. Rule false alerts: {result['rule_false_positives']}."
-            self.evidence.setText(message+' Generated fixtures; not AI or production results.')
+            self.evidence.setText(message+' Monitoring comparison uses generated examples.')
+            metrics = result['monitoring_experiment']['confusion_counts']
+            self.note(f"Generated monitoring comparison · rule FP {metrics['rule']['fp']}, FN {metrics['rule']['fn']} · model FP {metrics['model']['fp']}, FN {metrics['model']['fn']}.")
+            self.note('Encrypted archive drill passed after the generated primary was removed.')
             self.note('Study report: '+result['report_path'])
         elif result.get('kind') == 'backup_plan':
             m = result['manifest']
@@ -532,8 +554,12 @@ class MainWindow(QMainWindow):
             self.evidence.setText(message)
         elif 'output' in result:
             message += '\nRestored to: '+result['output']
-            if result.get('kind') == 'encrypted_restore':
+            if result.get('kind') in ('encrypted_restore','archive_drill'):
                 self.security_status.setText(f"ENCRYPTED RESTORE PASS · Authentication and SHA-256 checks passed · {result['files']} files · {result['restore_seconds']:.3f}s measured. Restored files are unencrypted.")
+            if result.get('kind') == 'archive_drill':
+                outcome = 'PASS' if result['target_met'] else 'MISSED'
+                self.evidence.setText(f"Archive drill · {result['restore_seconds']:.3f}s / {result['target_seconds']}s target · {outcome}")
+                self.note(result.get('report_path') or result['report_save_error'])
             if result.get('kind') == 'recovery_test':
                 t = 'PASS' if result['file_recovery_target_met'] else 'MISSED'
                 a = result['recovery_point_age_seconds']

@@ -6,8 +6,12 @@ import json
 import shutil
 import sqlite3
 import time
+import tempfile
+import secrets
 import uuid
 import backup_engine as engine
+from monitoring_study import model_study
+import encrypted_backup as encrypted
 
 
 def changes(previous, current):
@@ -197,8 +201,29 @@ def controlled_study(destination, rto_seconds=300, rpo_minutes=60, progress=lamb
                        'student_record_query_pass':usable,'student_records':len(records),
                        'recovery_report':result['report_path'],
                        'note':'The accident trial backs up the deletion; a hash-valid latest snapshot is not necessarily the desired historical state.'})
-        progress(int((index+1)*100/len(scenarios)),scenario)
+        progress(int((index+1)*90/len(scenarios)),scenario)
+    progress(95,'Testing encrypted recovery from the alternate copy')
+    with tempfile.TemporaryDirectory() as recovery_fixture:
+        fixture = Path(recovery_fixture)
+        alternate = fixture/'alternate'
+        alternate.mkdir()
+        password = secrets.token_urlsafe(24)
+        with tempfile.TemporaryDirectory(dir=fixture) as primary_fixture:
+            local = Path(primary_fixture)
+            sample = local/'source'
+            sample.mkdir()
+            (sample/'records.txt').write_text('Generated student record',encoding='utf-8')
+            vault = local/'vault'
+            snapshot = engine.create_backup(sample,vault)
+            archive = local/'sample.rvault'
+            encrypted.export_encrypted(vault/snapshot['id'],archive,password)
+            copy = encrypted.copy_verified_archive(archive,alternate,password)
+        drill = encrypted.archive_drill(copy['archive'],workspace,password,rto_seconds)
+        assert (Path(drill['output'])/'records.txt').read_text(encoding='utf-8') == 'Generated student record'
+        drill['fixture_note'] = 'Generated primary and source were removed before restore. Alternate storage was local test media.'
     report = {'kind':'controlled_study','workspace':str(workspace),'trials':trials,
+              'monitoring_experiment':model_study(),
+              'encrypted_recovery_drill':drill,
               'rule_true_positives':sum(t['rule_alert'] and t['synthetic_suspicious_label'] for t in trials),
               'rule_false_positives':sum(t['rule_alert'] and not t['synthetic_suspicious_label'] for t in trials),
               'service_query_passes':sum(t['student_record_query_pass'] for t in trials),
@@ -210,4 +235,5 @@ def controlled_study(destination, rto_seconds=300, rpo_minutes=60, progress=lamb
     path = workspace/'study-report.json'
     path.write_text(json.dumps(report,indent=2),encoding='utf-8')
     report['report_path'] = str(path)
+    progress(100,'Study complete')
     return report

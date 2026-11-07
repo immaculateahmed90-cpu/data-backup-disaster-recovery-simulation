@@ -59,6 +59,18 @@ class EncryptedBackupTests(unittest.TestCase):
         self.export()
         self.assert_no_restore(password='wrong password')
 
+    def test_verified_copy_rejects_wrong_password_and_preserves_existing_archive(self):
+        self.export()
+        destination = self.root/'alternate'
+        destination.mkdir()
+        with self.assertRaises(ValueError):
+            enc.copy_verified_archive(self.archive,destination,'wrong password')
+        self.assertEqual(list(destination.iterdir()),[])
+        copy = enc.copy_verified_archive(self.archive,destination,PASSWORD)
+        self.assertEqual(Path(copy['archive']).read_bytes(),self.archive.read_bytes())
+        with self.assertRaises(ValueError):
+            enc.copy_verified_archive(self.archive,destination,PASSWORD)
+
     def test_ciphertext_header_nonce_and_tag_tampering_rejected(self):
         self.export()
         raw = self.archive.read_bytes()

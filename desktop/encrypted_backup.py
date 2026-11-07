@@ -179,3 +179,54 @@ def restore_encrypted(archive, destination, password, progress=lambda n,text:Non
         if staging is not None and staging.exists():
             shutil.rmtree(staging)
         raise
+
+
+def copy_verified_archive(archive, destination, password, progress=lambda n,text:None):
+    """Publish a new copy only after authenticating the destination bytes."""
+    archive = engine.clean_path(archive)
+    destination = engine.clean_path(destination)
+    output = destination / archive.name
+    if not destination.is_dir() or output.exists():
+        raise ValueError('Choose an existing destination folder without an archive of the same name.')
+    if archive.stat().st_size > HEADER_SIZE + MAX_PAYLOAD + 16:
+        raise ValueError('Archive exceeds the supported size.')
+    staging = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix='.archive-copy-',dir=destination,delete=False) as dst:
+            staging = Path(dst.name)
+            with archive.open('rb') as src:
+                remaining = HEADER_SIZE + MAX_PAYLOAD + 16
+                for block in iter(lambda: src.read(CHUNK),b''):
+                    remaining -= len(block)
+                    if remaining < 0:
+                        raise ValueError('Archive exceeds the supported size.')
+                    dst.write(block)
+            dst.flush()
+            os.fsync(dst.fileno())
+        _decrypt_to(staging,password,lambda block: None,progress)
+        if os.name == 'nt':
+            staging.rename(output)
+        else:
+            os.link(staging,output)
+        progress(100,'Destination archive authenticated')
+        return {'kind':'verified_archive_copy','archive':str(output),'authentication':'PASS',
+                'archive_bytes':output.stat().st_size,
+                'placement':'User-selected destination. Physical separation and retention are operator-managed.'}
+    finally:
+        if staging is not None:
+            staging.unlink(missing_ok=True)
+
+
+def archive_drill(archive, destination, password, target_seconds, progress=lambda n,text:None):
+    result = restore_encrypted(archive,destination,password,progress)
+    result.update(kind='archive_drill', archive=str(archive), target_seconds=target_seconds,
+                  target_met=result['restore_seconds'] <= target_seconds,
+                  scope='Archive-only file restore and verification. Media placement and primary availability are recorded by the operator.')
+    report = Path(destination)/('Archive-drill-'+uuid.uuid4().hex+'.json')
+    try:
+        with report.open('x',encoding='utf-8') as stream:
+            json.dump(result,stream,indent=2)
+        result['report_path'] = str(report)
+    except OSError as exc:
+        result['report_save_error'] = str(exc)
+    return result
