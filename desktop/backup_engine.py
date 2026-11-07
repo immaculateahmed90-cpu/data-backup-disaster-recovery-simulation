@@ -52,6 +52,12 @@ def safe_relative(name):
 def read_manifest(snapshot):
     snapshot = clean_path(snapshot)
     m = json.loads(clean_path(snapshot / 'manifest.json').read_text(encoding='utf-8'))
+    return validate_manifest(m)
+
+
+def validate_manifest(m):
+    if not isinstance(m,dict):
+        raise ValueError('Invalid backup manifest.')
     if m.get('format') != 1 or not isinstance(m.get('files'), dict):
         raise ValueError('Unsupported backup manifest.')
     if not isinstance(m.get('id'),str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}',m['id']):

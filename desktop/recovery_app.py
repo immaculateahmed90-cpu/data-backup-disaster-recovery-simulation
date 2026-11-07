@@ -8,9 +8,11 @@ from PySide6.QtGui import QColor, QPainter, QPen, QDesktopServices, QFontDatabas
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QPushButton,
     QHBoxLayout, QVBoxLayout, QGridLayout, QFrame, QLineEdit, QFileDialog,
     QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar, QMessageBox,
-    QAbstractItemView, QSplitter, QTextEdit, QSpinBox, QComboBox, QScrollArea)
+    QAbstractItemView, QSplitter, QTextEdit, QSpinBox, QComboBox, QScrollArea,
+    QInputDialog, QDialog)
 import backup_engine as engine
 import research_tools as research
+import encrypted_backup as encrypted
 
 
 def size(n):
@@ -34,6 +36,10 @@ class Worker(QThread):
             self.result.emit(self.fn(*self.args, progress=self.progress.emit))
         except Exception as exc:
             self.error.emit(str(exc))
+        finally:
+            # Do not retain password arguments on the completed worker object.
+            self.args = ()
+            self.fn = None
 
 
 class StorageChart(QWidget):
@@ -135,7 +141,7 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(content)
-        content.setMinimumHeight(1090)
+        content.setMinimumHeight(1240)
         page.addWidget(scroll)
         hero = QHBoxLayout()
         text = QVBoxLayout()
@@ -186,6 +192,19 @@ class MainWindow(QMainWindow):
         topology.setWordWrap(True)
         grid.addWidget(topology,5,0,1,3)
         layout.addWidget(config)
+        security = card()
+        sec = QVBoxLayout(security)
+        sec.addWidget(QLabel('ENCRYPTED RECOVERY COPY  ·  AES-256-GCM'))
+        self.security_status = QLabel('Folder backups remain unencrypted. Encrypted exports support up to 32 GiB per archive. Passwords are not saved and cannot be reset.')
+        self.security_status.setWordWrap(True)
+        sec.addWidget(self.security_status)
+        secure_actions = QHBoxLayout()
+        self.encrypt_button = self.button('Export selected as encrypted archive',self.encrypt_selected)
+        self.decrypt_button = self.button('Restore encrypted archive',self.decrypt_archive)
+        secure_actions.addWidget(self.encrypt_button)
+        secure_actions.addWidget(self.decrypt_button)
+        sec.addLayout(secure_actions)
+        layout.addWidget(security)
         evaluation = card()
         ev = QGridLayout(evaluation)
         ev.addWidget(QLabel('RECOVERY EVALUATION  ·  File-level targets'),0,0,1,4)
@@ -399,6 +418,57 @@ class MainWindow(QMainWindow):
             self.settings.setValue('rpo',self.rpo.value())
             self.launch('Recovery test',research.recovery_test,(r['snapshot_path'],destination,self.rto.value(),self.rpo.value()))
 
+    def password_prompt(self, confirm=False):
+        def ask(label):
+            dialog = QInputDialog(self)
+            dialog.setWindowTitle('Encrypted backup password')
+            dialog.setLabelText(label)
+            dialog.setTextEchoMode(QLineEdit.Password)
+            ok = dialog.exec() == QDialog.Accepted
+            value = dialog.textValue() if ok else None
+            dialog.setTextValue('')
+            dialog.deleteLater()
+            return value
+        password = ask('Use a long, unique passphrase (at least 12 characters).\nKeep it safely: there is no password reset.' if confirm else 'Enter the archive password.\nWrong passwords and damaged archives cannot be restored.')
+        if password is None:
+            return None
+        if confirm and (len(password)<12 or len(password.encode('utf-8'))>1024):
+            QMessageBox.information(self,'Password length','Use at least 12 characters and no more than 1024 UTF-8 bytes.')
+            return None
+        if confirm:
+            repeated = ask('Re-enter the same passphrase to confirm.')
+            if repeated is None:
+                return None
+            if password != repeated:
+                QMessageBox.information(self,'Passwords differ','Passwords did not match. No archive was created.')
+                return None
+        return password
+
+    def encrypt_selected(self):
+        r = self.selected()
+        if not r:
+            return
+        path,_ = QFileDialog.getSaveFileName(self,'Save encrypted recovery copy — choose a new filename',r['id']+'.rvault','Recovery Vault encrypted (*.rvault)')
+        if not path:
+            return
+        if Path(path).exists():
+            QMessageBox.information(self,'Choose a new filename','Existing files are never overwritten by encrypted export.')
+            return
+        password = self.password_prompt(confirm=True)
+        if password is not None:
+            self.launch('Encrypted export',encrypted.export_encrypted,(r['snapshot_path'],path,password))
+
+    def decrypt_archive(self):
+        path,_ = QFileDialog.getOpenFileName(self,'Choose encrypted recovery archive','','Recovery Vault encrypted (*.rvault);;All files (*)')
+        if not path:
+            return
+        destination = QFileDialog.getExistingDirectory(self,'Choose restore destination — a new subfolder will be created')
+        if not destination:
+            return
+        password = self.password_prompt()
+        if password is not None:
+            self.launch('Encrypted restore',encrypted.restore_encrypted,(path,destination,password))
+
     def recommend(self):
         storage = self.vault if self.history_location.currentIndex() == 0 else self.secondary
         if not storage.text().strip():
@@ -440,7 +510,10 @@ class MainWindow(QMainWindow):
         self.last_result = result
         self.progress.setValue(100)
         message = self.operation+' complete. All copied file hashes verified.'
-        if result.get('kind') == 'controlled_study':
+        if result.get('kind') == 'encrypted_export':
+            message = f"Encrypted archive created and authenticated: {result['archive']}"
+            self.security_status.setText('ARCHIVE VERIFIED · AES-256-GCM · '+size(result['archive_bytes'])+'. Folder backups remain unencrypted.')
+        elif result.get('kind') == 'controlled_study':
             message = f"Controlled study complete: {result['service_query_passes']}/5 student-record queries passed after real restoration. Rule false alerts: {result['rule_false_positives']}."
             self.evidence.setText(message+' Generated fixtures; not AI or production results.')
             self.note('Study report: '+result['report_path'])
@@ -459,6 +532,8 @@ class MainWindow(QMainWindow):
             self.evidence.setText(message)
         elif 'output' in result:
             message += '\nRestored to: '+result['output']
+            if result.get('kind') == 'encrypted_restore':
+                self.security_status.setText(f"ENCRYPTED RESTORE PASS · Authentication and SHA-256 checks passed · {result['files']} files · {result['restore_seconds']:.3f}s measured. Restored files are unencrypted.")
             if result.get('kind') == 'recovery_test':
                 t = 'PASS' if result['file_recovery_target_met'] else 'MISSED'
                 a = result['recovery_point_age_seconds']

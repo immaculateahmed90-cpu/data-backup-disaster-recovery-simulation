@@ -46,14 +46,15 @@ RTO. The chart shows file payload bytes, excluding filesystem/manifest overhead.
 Verification rereads every listed file and checks SHA-256. It is an integrity check,
 not proof against an attacker who can modify both files and manifests.
 
-## Scope of this first version
+## Implemented scope
 
 Manual full folder snapshots, primary and optional secondary copies, history for
 either storage destination, file browser, measured copy time, background workers,
 progress, integrity verification, separate-folder restore, rule-based change review,
-measured recovery tests, verified recovery-point recommendations and JSON reports.
+measured recovery tests, verified recovery-point recommendations, password-encrypted
+archive export/restore and JSON reports.
 
-No scheduled jobs, encryption, compression, incremental backups, cloud copies,
+No scheduled jobs, compression, incremental backups, cloud API copies,
 automatic retention/deletion, Volume Shadow Copy, open-database consistency or
 system-image/bare-metal recovery. File content and basic copy2 metadata are copied;
 Windows ACLs, alternate streams and application-specific consistency are not guaranteed.
@@ -88,8 +89,9 @@ Original + primary + secondary gives three logical copies. Two folders on one di
 do not establish independent media. Off-site placement must be arranged by the user,
 for example with a suitably configured mounted remote storage destination. Copying
 to a cloud-sync folder alone does not prove an off-site upload completed. There is
-no cloud API, upload confirmation, geographic verification, immutability or encryption
-in this version. Disconnect an external recovery copy safely after the operation if
+no cloud API, upload confirmation, geographic verification or immutability.
+Ordinary folder backups are not encrypted. Version 3 adds separately encrypted
+archive exports as described below. Disconnect an external recovery copy safely after the operation if
 your backup procedure requires offline storage. Never label this app ransomware-proof.
 
 ### Recovery targets and evidence
@@ -142,5 +144,74 @@ These fixtures illustrate the implementation; they do not establish general dete
 accuracy, production recovery guarantees, off-site resilience, or AI effectiveness.
 The student-record query is a narrow service-usability check, not a full university
 application restart. AI evaluation still requires an actual model, labeled data and
-a fair baseline. Encryption, protected/immutable storage, scheduling and full service
-recovery remain outside the implemented scope.
+a fair baseline. Immutable storage, scheduling and full service
+recovery remain outside the implemented scope. Version 3 adds encrypted archive
+exports; it does not automatically encrypt ordinary snapshots.
+
+## Version 3: encrypted recovery copies
+
+1. Select an ordinary snapshot in the backup history.
+2. Click **Export selected as encrypted archive** and choose a new `.rvault` filename,
+   for example on an external recovery drive. Existing files are never overwritten.
+3. Enter and confirm a unique passphrase of at least 12 characters. Keep it in a
+   safe password manager or separately secured record. There is no password reset:
+   losing it means that encrypted archive cannot be recovered without another copy.
+4. The worker verifies the source snapshot, encrypts its manifest (including file
+   names) and contents, then rereads and authenticates the finished archive before
+   publishing it. **Export latest result** saves a password-free operation report.
+5. To recover, click **Restore encrypted archive**, select the archive and a separate
+   destination, and enter its password. The original snapshot folder is not needed.
+   Authentication must succeed before any files are restored. Files are written into
+   a unique new subfolder and their content is verified with SHA-256.
+
+The `.rvault` archive alone is encrypted. Original source folders, primary/secondary
+folder snapshots, JSON reports and restored files remain unencrypted. No password
+or encryption key is saved in settings, logs, manifests or operation reports.
+Masked dialogs are cleared after use and completed workers release their arguments;
+Python does not guarantee secure erasure of immutable strings or process memory.
+Use a long, unique password: encryption cannot compensate for a guessable password.
+
+### Archive format and limits
+
+This version uses the official PyCA `cryptography` package: AES-256-GCM with a random
+96-bit nonce, 128-bit authentication tag, and a 256-bit key derived with scrypt
+(N=131072, r=8, p=1) from the password and a random 16-byte salt. The fixed version
+header is authenticated. Ciphertext modifications, wrong passwords, truncation and
+appended bytes fail authentication. The container is specific to Recovery Vault;
+retain the app source and requirements along with recovery instructions.
+
+Limit: 32 GiB total plaintext payload per archive and an 8 MiB JSON manifest. The
+archive is uncompressed. Normal folder backups do not acquire this archive limit.
+The encryption implementation uses bounded chunks rather than loading all file
+contents into RAM. Scrypt requires about 128 MiB of memory per key derivation.
+Export does not create a plaintext archive on disk. During restore, a temporary
+plaintext payload file is created in the operating-system temp folder and is closed
+and removed after success or failure; it is not parsed until authentication passes.
+Allow space on the system temp drive and on the restore drive. Removal is not secure
+wiping, and a crash or forced process termination can leave temporary data. For
+sensitive data, use appropriate whole-disk encryption and a trusted computer.
+
+Encrypted restore preserves file bytes, names and directory structure, including
+empty folders. It does not preserve original timestamps, ACLs, alternate streams or
+all filesystem attributes. Plain snapshots and encrypted archives have different
+history workflows: the table lists folder snapshots, while encrypted archives are
+opened through **Restore encrypted archive**.
+
+Encryption protects confidentiality and detects modifications to the archive; it
+does not prevent archive deletion, ransomware on an unlocked computer, or password
+theft. This is a tested project implementation, not an independently audited backup
+product. Immutable/offline storage, genuinely independent off-site copies, and an
+evaluated AI model remain separate work.
+
+### Update an existing installation
+
+Close the app before updating. After pulling the development branch:
+
+```powershell
+$appEnvironment = Join-Path $env:LOCALAPPDATA 'RecoveryVault\venv'
+& "$appEnvironment\Scripts\python.exe" -m pip install -r desktop\requirements.txt
+& "$appEnvironment\Scripts\python.exe" desktop\recovery_app.py
+```
+
+Run those two commands from the repository root. The initial-install instructions
+at the top of this file assume you are inside the desktop folder.

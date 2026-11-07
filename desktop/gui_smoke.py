@@ -1,14 +1,16 @@
 """Off-screen widget check; uses only temporary synthetic sample files."""
+import json
 import os
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 import sys
 import tempfile
 from pathlib import Path
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, QEventLoop
 from PySide6.QtWidgets import QApplication
 import backup_engine as engine
 import research_tools as research
-from recovery_app import MainWindow, STYLE, configure_fonts
+import encrypted_backup as encrypted
+from recovery_app import MainWindow, STYLE, configure_fonts, Worker
 
 
 def main():
@@ -44,20 +46,40 @@ def main():
         assert window.table.rowCount() == 4
         window.history_location.setCurrentIndex(0)
         selected = window.records[0]
+        assert window.encrypt_button.isEnabled()
+        assert window.decrypt_button.isEnabled()
         engine.verify_backup(selected['snapshot_path'])
         restored = research.recovery_test(selected['snapshot_path'],root/'Recovered documents',300,60)
         assert Path(restored['output']).is_dir()
         window.evidence.setText(f"FILE RECOVERY PASS · {restored['restore_seconds']:.3f}s / 300s target. Recovery-point age target PASS. Service not tested in this run.")
         window.review.setText('CHANGE REVIEW · Rule-based, not AI · Both sample backup copies verified. Media/site independence not established.')
         window.note('Preview data only: 4 sample snapshots created and verified.')
+        results, errors = [], []
+        loop = QEventLoop()
+        worker = Worker(encrypted.export_encrypted,(selected['snapshot_path'],root/'sample.rvault','Test-only-preview-passphrase'))
+        worker.result.connect(results.append)
+        worker.error.connect(errors.append)
+        worker.finished.connect(loop.quit)
+        worker.start()
+        loop.exec()
+        worker.wait()
+        assert not errors, errors
+        assert len(results) == 1
+        assert worker.args == ()
+        result = encrypted.restore_encrypted(root/'sample.rvault',root/'Decrypted sample','Test-only-preview-passphrase')
+        assert result['integrity'] == 'PASS'
+        window.operation = 'Encrypted export'
+        window.done(results[0])
+        assert 'ARCHIVE VERIFIED' in window.security_status.text()
+        assert 'Test-only-preview-passphrase' not in json.dumps(results[0])
         window.status.setText('Preview with temporary sample files · real backup and restore engine verified')
-        window.resize(1440,1250)
+        window.resize(1440,1420)
         window.show()
         app.processEvents()
         if len(sys.argv) > 1:
             assert window.grab().save(sys.argv[1])
         window.close()
-        print('GUI rendered; history and file browser checked; actual disk restore verified.')
+        print('GUI rendered; history and file browser checked; encrypted worker export and disk restore verified; completed worker password arguments released.')
 
 
 if __name__ == '__main__':
